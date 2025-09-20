@@ -1,0 +1,83 @@
+apiVersion: nodeguardian.k8s.io/v1
+kind: NodeGuardianRule
+metadata:
+  name: high-load-isolation
+  labels:
+    app.kubernetes.io/name: nodeguardian
+    app.kubernetes.io/component: rule
+spec:
+  # 触发条件：CPU负载率 > 1.5 且 内存使用率 > 90%
+  conditions:
+    - metric: "cpuLoadRatio"
+      operator: "GreaterThan"
+      value: 1.5
+      duration: "3m"
+      description: "CPU负载率超过1.5倍核数"
+    - metric: "memoryUtilizationPercent"
+      operator: "GreaterThan"
+      value: 90
+      duration: "2m"
+      description: "内存使用率超过90%"
+  
+  conditionLogic: "AND"  # 两个条件都满足才触发
+  
+  # 目标节点：所有worker节点
+  nodeSelector:
+    matchLabels:
+      node-role.kubernetes.io/worker: "true"
+  
+  # 执行动作：打污点 + 发送告警
+  actions:
+    - type: "taint"
+      taint:
+        key: "nodeguardian/high-load"
+        value: "true"
+        effect: "NoSchedule"
+    - type: "alert"
+      alert:
+        enabled: true
+        template: "high-load-alert"
+        channels: ["email", "slack"]
+    - type: "label"
+      label:
+        labels:
+          nodeguardian.io/status: "high-load"
+          nodeguardian.io/triggered-at: "{{ .timestamp }}"
+  
+  # 恢复条件：CPU负载率 < 0.8 且 内存使用率 < 70%
+  recoveryConditions:
+    - metric: "cpuLoadRatio"
+      operator: "LessThan"
+      value: 0.8
+      duration: "5m"
+    - metric: "memoryUtilizationPercent"
+      operator: "LessThan"
+      value: 70
+      duration: "3m"
+  
+  # 恢复动作：移除污点和标签
+  recoveryActions:
+    - type: "removeTaint"
+      taint:
+        key: "nodeguardian/high-load"
+    - type: "removeLabel"
+      label:
+        keys: ["nodeguardian.io/status", "nodeguardian.io/triggered-at"]
+    - type: "alert"
+      alert:
+        template: "recovery-alert"
+        channels: ["email"]
+  
+  # 监控配置
+  monitoring:
+    checkInterval: "30s"
+    metricsSource:
+      prometheusURL: "http://prometheus-k8s.monitoring.svc:9090"
+    cooldownPeriod: "10m"
+  
+  # 规则元数据
+  metadata:
+    priority: 100
+    enabled: true
+    description: "高负载节点自动隔离规则"
+    tags: ["production", "critical"]

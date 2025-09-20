@@ -1,0 +1,682 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nodeguardian
+  namespace: nodeguardian-system
+  labels:
+    app.kubernetes.io/name: nodeguardian
+    app.kubernetes.io/component: controller
+    app.kubernetes.io/version: "1.0.0"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: nodeguardian
+      app.kubernetes.io/component: controller
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nodeguardian
+        app.kubernetes.io/component: controller
+        app.kubernetes.io/version: "1.0.0"
+    spec:
+      serviceAccountName: nodeguardian
+      containers:
+      - name: nodeguardian
+        image: ${IMAGE_NAME:-nodeguardian-shell}:${IMAGE_TAG:-latest}
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 9115
+          protocol: TCP
+        env:
+        - name: SHELL_OPERATOR_HOOKS_DIR
+          value: "/hooks"
+        - name: NODEGUARDIAN_NAMESPACE
+          value: "nodeguardian-system"
+        - name: LOG_LEVEL
+          value: "INFO"
+        - name: PROMETHEUS_URL
+          value: "http://prometheus-k8s.monitoring.svc:9090"
+        - name: METRICS_SERVER_URL
+          value: "https://kubernetes.default.svc:443/apis/metrics.k8s.io/v1beta1"
+        # 告警配置
+        - name: ALERT_EMAIL_SMTP
+          value: "smtp.gmail.com:587"
+        - name: ALERT_EMAIL_FROM
+          value: "nodeguardian@example.com"
+        - name: ALERT_EMAIL_TO
+          value: "admin@example.com"
+        - name: ALERT_SLACK_WEBHOOK
+          value: ""
+        - name: ALERT_WEBHOOK_URL
+          value: ""
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: hooks
+          mountPath: /hooks
+          readOnly: true
+      volumes:
+      - name: tmp
+        emptyDir: {}
+      - name: hooks
+        configMap:
+          name: nodeguardian-hooks
+          defaultMode: 0755
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 30
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nodeguardian
+  namespace: nodeguardian-system
+  labels:
+    app.kubernetes.io/name: nodeguardian
+    app.kubernetes.io/component: controller
+spec:
+  type: ClusterIP
+  ports:
+  - name: http
+    port: 9115
+    targetPort: http
+    protocol: TCP
+  selector:
+    app.kubernetes.io/name: nodeguardian
+    app.kubernetes.io/component: controller
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nodeguardian-hooks
+  namespace: nodeguardian-system
+  labels:
+    app.kubernetes.io/name: nodeguardian
+    app.kubernetes.io/component: controller
+data:
+  nodeguardian-controller.sh: |
+    #!/usr/bin/env bash
+    
+    # NodeGuardian Main Controller Hook
+    # 监听NodeGuardianRule CRD变化并管理规则生命周期
+    
+    set -euo pipefail
+    
+    # 加载公共库
+    source /hooks/lib/common.sh
+    
+    # Hook配置
+    if [[ $1 == "--config" ]]; then
+        cat <<EOF
+    configVersion: v1
+    onStartup: 1
+    kubernetes:
+    - name: "monitor-nodeguardian-rules"
+      apiVersion: "nodeguardian.k8s.io/v1"
+      kind: "NodeGuardianRule"
+      executeHookOnEvent: ["Added", "Modified", "Deleted"]
+      executeHookOnSynchronization: true
+      queue: "nodeguardian-rules"
+    - name: "monitor-alert-templates"
+      apiVersion: "nodeguardian.k8s.io/v1"
+      kind: "AlertTemplate"
+      executeHookOnEvent: ["Added", "Modified", "Deleted"]
+      executeHookOnSynchronization: true
+      queue: "nodeguardian-rules"
+    schedule:
+    - name: "rule-evaluation"
+      crontab: "*/1 * * * *"  # 每分钟执行一次
+      queue: "rule-evaluation"
+      includeSnapshotsFrom: ["monitor-nodeguardian-rules"]
+    settings:
+      executionMinInterval: 10s
+      executionBurst: 1
+    EOF
+        exit 0
+    fi
+    
+    # 初始化
+    init_nodeguardian
+    
+    # 读取绑定上下文
+    BINDING_CONTEXT_PATH="${BINDING_CONTEXT_PATH:-/tmp/binding_context.json}"
+    if [[ ! -f "$BINDING_CONTEXT_PATH" ]]; then
+        log "ERROR" "Binding context file not found: $BINDING_CONTEXT_PATH"
+        exit 1
+    fi
+    
+    # 处理绑定上下文
+    process_binding_context() {
+        local context_type=$(jq -r '.[0].type' "$BINDING_CONTEXT_PATH")
+        local binding=$(jq -r '.[0].binding' "$BINDING_CONTEXT_PATH")
+        
+        log "INFO" "Processing binding context: type=$context_type, binding=$binding"
+        
+        case "$context_type" in
+            "onStartup")
+                handle_startup
+                ;;
+            "Synchronization")
+                handle_synchronization
+                ;;
+            "Event")
+                handle_event
+                ;;
+            "Schedule")
+                handle_schedule
+                ;;
+            *)
+                log "WARN" "Unknown binding context type: $context_type"
+                ;;
+        esac
+    }
+    
+    # 处理启动事件
+    handle_startup() {
+        log "INFO" "NodeGuardian controller starting up..."
+        
+        # 创建必要的资源
+        create_namespace_if_not_exists
+        create_configmap_if_not_exists
+        
+        # 初始化所有现有规则
+        initialize_existing_rules
+        
+        log "INFO" "NodeGuardian controller startup completed"
+    }
+    
+    # 处理同步事件
+    handle_synchronization() {
+        local binding=$(jq -r '.[0].binding' "$BINDING_CONTEXT_PATH")
+        
+        case "$binding" in
+            "monitor-nodeguardian-rules")
+                handle_rules_synchronization
+                ;;
+            "monitor-alert-templates")
+                handle_templates_synchronization
+                ;;
+        esac
+    }
+    
+    # 处理规则同步
+    handle_rules_synchronization() {
+        local rules_count=$(jq -r '.[0].objects | length' "$BINDING_CONTEXT_PATH")
+        log "INFO" "Synchronizing $rules_count NodeGuardianRule objects"
+        
+        for ((i=0; i<rules_count; i++)); do
+            local rule_object=$(jq -r ".[0].objects[$i].object" "$BINDING_CONTEXT_PATH")
+            local rule_name=$(echo "$rule_object" | jq -r '.metadata.name')
+            local rule_enabled=$(echo "$rule_object" | jq -r '.spec.metadata.enabled // true')
+            
+            if [[ "$rule_enabled" == "true" ]]; then
+                register_rule "$rule_object"
+            else
+                unregister_rule "$rule_name"
+            fi
+        done
+    }
+    
+    # 处理模板同步
+    handle_templates_synchronization() {
+        local templates_count=$(jq -r '.[0].objects | length' "$BINDING_CONTEXT_PATH")
+        log "INFO" "Synchronizing $templates_count AlertTemplate objects"
+        
+        for ((i=0; i<templates_count; i++)); do
+            local template_object=$(jq -r ".[0].objects[$i].object" "$BINDING_CONTEXT_PATH")
+            local template_name=$(echo "$template_object" | jq -r '.metadata.name')
+            
+            register_alert_template "$template_object"
+        done
+    }
+    
+    # 处理事件
+    handle_event() {
+        local binding=$(jq -r '.[0].binding' "$BINDING_CONTEXT_PATH")
+        local watch_event=$(jq -r '.[0].watchEvent' "$BINDING_CONTEXT_PATH")
+        local object=$(jq -r '.[0].object' "$BINDING_CONTEXT_PATH")
+        
+        case "$binding" in
+            "monitor-nodeguardian-rules")
+                handle_rule_event "$watch_event" "$object"
+                ;;
+            "monitor-alert-templates")
+                handle_template_event "$watch_event" "$object"
+                ;;
+        esac
+    }
+    
+    # 处理规则事件
+    handle_rule_event() {
+        local watch_event="$1"
+        local rule_object="$2"
+        local rule_name=$(echo "$rule_object" | jq -r '.metadata.name')
+        
+        log "INFO" "Processing rule event: $watch_event for rule: $rule_name"
+        
+        case "$watch_event" in
+            "Added"|"Modified")
+                local rule_enabled=$(echo "$rule_object" | jq -r '.spec.metadata.enabled // true')
+                if [[ "$rule_enabled" == "true" ]]; then
+                    register_rule "$rule_object"
+                else
+                    unregister_rule "$rule_name"
+                fi
+                ;;
+            "Deleted")
+                unregister_rule "$rule_name"
+                ;;
+        esac
+    }
+    
+    # 处理模板事件
+    handle_template_event() {
+        local watch_event="$1"
+        local template_object="$2"
+        local template_name=$(echo "$template_object" | jq -r '.metadata.name')
+        
+        log "INFO" "Processing template event: $watch_event for template: $template_name"
+        
+        case "$watch_event" in
+            "Added"|"Modified")
+                register_alert_template "$template_object"
+                ;;
+            "Deleted")
+                unregister_alert_template "$template_name"
+                ;;
+        esac
+    }
+    
+    # 处理定时任务
+    handle_schedule() {
+        local binding=$(jq -r '.[0].binding' "$BINDING_CONTEXT_PATH")
+        
+        if [[ "$binding" == "rule-evaluation" ]]; then
+            evaluate_all_rules
+        fi
+    }
+    
+    # 注册规则
+    register_rule() {
+        local rule_object="$1"
+        local rule_name=$(echo "$rule_object" | jq -r '.metadata.name')
+        local check_interval=$(echo "$rule_object" | jq -r '.spec.monitoring.checkInterval // "60s"')
+        
+        log "INFO" "Registering rule: $rule_name with check interval: $check_interval"
+        
+        # 保存规则到文件
+        local rule_file="/tmp/nodeguardian/rules/${rule_name}.json"
+        mkdir -p "$(dirname "$rule_file")"
+        echo "$rule_object" > "$rule_file"
+        
+        # 更新状态
+        update_rule_status "$rule_name" "Active" "" "[]"
+        
+        log "INFO" "Rule registered: $rule_name"
+    }
+    
+    # 注销规则
+    unregister_rule() {
+        local rule_name="$1"
+        
+        log "INFO" "Unregistering rule: $rule_name"
+        
+        # 删除规则文件
+        local rule_file="/tmp/nodeguardian/rules/${rule_name}.json"
+        rm -f "$rule_file"
+        
+        # 清理冷却期文件
+        rm -f "/tmp/nodeguardian/cooldown/${rule_name}_"*
+        
+        # 更新状态
+        update_rule_status "$rule_name" "Inactive" "Rule deleted" "[]"
+        
+        log "INFO" "Rule unregistered: $rule_name"
+    }
+    
+    # 注册告警模板
+    register_alert_template() {
+        local template_object="$1"
+        local template_name=$(echo "$template_object" | jq -r '.metadata.name')
+        
+        log "INFO" "Registering alert template: $template_name"
+        
+        # 保存模板到文件
+        local template_file="/tmp/nodeguardian/templates/${template_name}.json"
+        mkdir -p "$(dirname "$template_file")"
+        echo "$template_object" > "$template_file"
+        
+        log "INFO" "Alert template registered: $template_name"
+    }
+    
+    # 注销告警模板
+    unregister_alert_template() {
+        local template_name="$1"
+        
+        log "INFO" "Unregistering alert template: $template_name"
+        
+        # 删除模板文件
+        local template_file="/tmp/nodeguardian/templates/${template_name}.json"
+        rm -f "$template_file"
+        
+        log "INFO" "Alert template unregistered: $template_name"
+    }
+    
+    # 评估所有规则
+    evaluate_all_rules() {
+        local rules_dir="/tmp/nodeguardian/rules"
+        
+        if [[ ! -d "$rules_dir" ]]; then
+            return 0
+        fi
+        
+        log "DEBUG" "Evaluating all active rules..."
+        
+        for rule_file in "$rules_dir"/*.json; do
+            if [[ -f "$rule_file" ]]; then
+                local rule_name=$(basename "$rule_file" .json)
+                evaluate_rule "$rule_file"
+            fi
+        done
+    }
+    
+    # 评估单个规则
+    evaluate_rule() {
+        local rule_file="$1"
+        local rule_object=$(cat "$rule_file")
+        local rule_name=$(echo "$rule_object" | jq -r '.metadata.name')
+        local rule_enabled=$(echo "$rule_object" | jq -r '.spec.metadata.enabled // true')
+        
+        if [[ "$rule_enabled" != "true" ]]; then
+            return 0
+        fi
+        
+        log "DEBUG" "Evaluating rule: $rule_name"
+        
+        # 获取节点选择器
+        local node_selector=$(echo "$rule_object" | jq -r '.spec.nodeSelector')
+        local matching_nodes=$(get_matching_nodes "$node_selector")
+        
+        if [[ -z "$matching_nodes" ]]; then
+            log "WARN" "No matching nodes found for rule: $rule_name"
+            return 0
+        fi
+        
+        # 评估每个节点
+        local triggered_nodes=()
+        for node_name in $matching_nodes; do
+            if evaluate_node_for_rule "$rule_object" "$node_name"; then
+                triggered_nodes+=("$node_name")
+            fi
+        done
+        
+        # 如果有节点触发，执行动作
+        if [[ ${#triggered_nodes[@]} -gt 0 ]]; then
+            local triggered_nodes_json=$(printf '%s\n' "${triggered_nodes[@]}" | jq -R . | jq -s .)
+            execute_rule_actions "$rule_object" "$triggered_nodes_json"
+            update_rule_status "$rule_name" "Active" "Rule triggered" "$triggered_nodes_json"
+        fi
+    }
+    
+    # 评估节点是否满足规则条件
+    evaluate_node_for_rule() {
+        local rule_object="$1"
+        local node_name="$2"
+        local rule_name=$(echo "$rule_object" | jq -r '.metadata.name')
+        
+        # 检查冷却期
+        local cooldown_period=$(echo "$rule_object" | jq -r '.spec.monitoring.cooldownPeriod // "5m"')
+        if check_cooldown "$rule_name" "$node_name" "$cooldown_period"; then
+            log "DEBUG" "Rule $rule_name for node $node_name is in cooldown period"
+            return 1
+        fi
+        
+        # 获取条件
+        local conditions=$(echo "$rule_object" | jq -r '.spec.conditions')
+        local condition_logic=$(echo "$rule_object" | jq -r '.spec.conditionLogic // "AND"')
+        
+        local condition_count=$(echo "$conditions" | jq 'length')
+        local satisfied_conditions=0
+        
+        # 评估每个条件
+        for ((i=0; i<condition_count; i++)); do
+            local condition=$(echo "$conditions" | jq -r ".[$i]")
+            local metric=$(echo "$condition" | jq -r '.metric')
+            local operator=$(echo "$condition" | jq -r '.operator')
+            local threshold=$(echo "$condition" | jq -r '.value')
+            local duration=$(echo "$condition" | jq -r '.duration // "5m"')
+            
+            # 获取指标值
+            local metric_value=$(get_node_metrics "$node_name" "$metric")
+            
+            # 评估条件
+            if evaluate_condition "$metric_value" "$operator" "$threshold"; then
+                satisfied_conditions=$((satisfied_conditions + 1))
+                log "DEBUG" "Condition satisfied for node $node_name: $metric $operator $threshold (value: $metric_value)"
+            else
+                log "DEBUG" "Condition not satisfied for node $node_name: $metric $operator $threshold (value: $metric_value)"
+            fi
+        done
+        
+        # 根据逻辑判断是否触发
+        if [[ "$condition_logic" == "AND" ]]; then
+            [[ $satisfied_conditions -eq $condition_count ]]
+        else  # OR
+            [[ $satisfied_conditions -gt 0 ]]
+        fi
+    }
+    
+    # 执行规则动作
+    execute_rule_actions() {
+        local rule_object="$1"
+        local triggered_nodes="$2"
+        local rule_name=$(echo "$rule_object" | jq -r '.metadata.name')
+        local actions=$(echo "$rule_object" | jq -r '.spec.actions')
+        
+        log "INFO" "Executing actions for rule: $rule_name on nodes: $triggered_nodes"
+        
+        local action_count=$(echo "$actions" | jq 'length')
+        for ((i=0; i<action_count; i++)); do
+            local action=$(echo "$actions" | jq -r ".[$i]")
+            local action_type=$(echo "$action" | jq -r '.type')
+            
+            case "$action_type" in
+                "taint")
+                    execute_taint_action "$action" "$triggered_nodes"
+                    ;;
+                "alert")
+                    execute_alert_action "$action" "$rule_object" "$triggered_nodes"
+                    ;;
+                "evict")
+                    execute_evict_action "$action" "$triggered_nodes"
+                    ;;
+                "label")
+                    execute_label_action "$action" "$triggered_nodes"
+                    ;;
+                "annotation")
+                    execute_annotation_action "$action" "$triggered_nodes"
+                    ;;
+                *)
+                    log "WARN" "Unknown action type: $action_type"
+                    ;;
+            esac
+        done
+        
+        # 设置冷却期
+        local cooldown_period=$(echo "$rule_object" | jq -r '.spec.monitoring.cooldownPeriod // "5m"')
+        for node_name in $(echo "$triggered_nodes" | jq -r '.[]'); do
+            set_cooldown "$rule_name" "$node_name"
+        done
+    }
+    
+    # 执行污点动作
+    execute_taint_action() {
+        local action="$1"
+        local triggered_nodes="$2"
+        
+        local taint_key=$(echo "$action" | jq -r '.taint.key // "nodeguardian/rule-triggered"')
+        local taint_value=$(echo "$action" | jq -r '.taint.value // "true"')
+        local taint_effect=$(echo "$action" | jq -r '.taint.effect // "NoSchedule"')
+        
+        for node_name in $(echo "$triggered_nodes" | jq -r '.[]'); do
+            log "INFO" "Adding taint to node $node_name: $taint_key=$taint_value:$taint_effect"
+            kubectl taint nodes "$node_name" "$taint_key=$taint_value:$taint_effect" --overwrite || true
+        done
+    }
+    
+    # 执行告警动作
+    execute_alert_action() {
+        local action="$1"
+        local rule_object="$2"
+        local triggered_nodes="$3"
+        
+        local alert_enabled=$(echo "$action" | jq -r '.alert.enabled // true')
+        if [[ "$alert_enabled" != "true" ]]; then
+            return 0
+        fi
+        
+        local template_name=$(echo "$action" | jq -r '.alert.template // "default"')
+        local channels=$(echo "$action" | jq -r '.alert.channels // []')
+        
+        # 调用告警管理器
+        /hooks/alert-manager.sh "$template_name" "$rule_object" "$triggered_nodes" "$channels" || true
+    }
+    
+    # 执行驱逐动作
+    execute_evict_action() {
+        local action="$1"
+        local triggered_nodes="$2"
+        
+        local max_pods=$(echo "$action" | jq -r '.evict.maxPods // 10')
+        local exclude_namespaces=$(echo "$action" | jq -r '.evict.excludeNamespaces // ["kube-system", "kube-public"]')
+        
+        for node_name in $(echo "$triggered_nodes" | jq -r '.[]'); do
+            log "INFO" "Evicting pods from node $node_name (max: $max_pods)"
+            
+            # 获取节点上的Pod
+            local pods=$(kubectl get pods --all-namespaces -o json --field-selector spec.nodeName="$node_name" | \
+                jq -r --argjson exclude "$exclude_namespaces" \
+                '.items[] | select(.metadata.namespace as $ns | $exclude | index($ns) == null) | "\(.metadata.namespace)/\(.metadata.name)"')
+            
+            local evicted_count=0
+            for pod in $pods; do
+                if [[ $evicted_count -ge $max_pods ]]; then
+                    break
+                fi
+                
+                log "INFO" "Evicting pod: $pod"
+                kubectl delete pod "$pod" --grace-period=30 || true
+                evicted_count=$((evicted_count + 1))
+            done
+        done
+    }
+    
+    # 执行标签动作
+    execute_label_action() {
+        local action="$1"
+        local triggered_nodes="$2"
+        
+        local labels=$(echo "$action" | jq -r '.label.labels // {}')
+        
+        for node_name in $(echo "$triggered_nodes" | jq -r '.[]'); do
+            log "INFO" "Adding labels to node $node_name: $labels"
+            
+            local label_args=""
+            for key in $(echo "$labels" | jq -r 'keys[]'); do
+                local value=$(echo "$labels" | jq -r ".[\"$key\"]")
+                label_args="$label_args $key=$value"
+            done
+            
+            if [[ -n "$label_args" ]]; then
+                kubectl label nodes "$node_name" $label_args --overwrite || true
+            fi
+        done
+    }
+    
+    # 执行注解动作
+    execute_annotation_action() {
+        local action="$1"
+        local triggered_nodes="$2"
+        
+        local annotations=$(echo "$action" | jq -r '.annotation.annotations // {}')
+        
+        for node_name in $(echo "$triggered_nodes" | jq -r '.[]'); do
+            log "INFO" "Adding annotations to node $node_name: $annotations"
+            
+            local annotation_args=""
+            for key in $(echo "$annotations" | jq -r 'keys[]'); do
+                local value=$(echo "$annotations" | jq -r ".[\"$key\"]")
+                annotation_args="$annotation_args $key=$value"
+            done
+            
+            if [[ -n "$annotation_args" ]]; then
+                kubectl annotate nodes "$node_name" $annotation_args --overwrite || true
+            fi
+        done
+    }
+    
+    # 创建命名空间
+    create_namespace_if_not_exists() {
+        if ! kubectl get namespace "$NODEGUARDIAN_NAMESPACE" >/dev/null 2>&1; then
+            log "INFO" "Creating namespace: $NODEGUARDIAN_NAMESPACE"
+            kubectl create namespace "$NODEGUARDIAN_NAMESPACE"
+        fi
+    }
+    
+    # 创建配置映射
+    create_configmap_if_not_exists() {
+        if ! kubectl get configmap "nodeguardian-config" -n "$NODEGUARDIAN_NAMESPACE" >/dev/null 2>&1; then
+            log "INFO" "Creating configmap: nodeguardian-config"
+            kubectl create configmap "nodeguardian-config" \
+                --from-literal=prometheus_url="$PROMETHEUS_URL" \
+                --from-literal=metrics_server_url="$METRICS_SERVER_URL" \
+                --from-literal=log_level="$LOG_LEVEL" \
+                -n "$NODEGUARDIAN_NAMESPACE"
+        fi
+    }
+    
+    # 初始化现有规则
+    initialize_existing_rules() {
+        log "INFO" "Initializing existing NodeGuardianRule objects..."
+        
+        # 这里会在同步阶段处理
+        return 0
+    }
+    
+    # 主函数
+    main() {
+        log "INFO" "NodeGuardian controller hook started"
+        
+        process_binding_context
+        
+        log "INFO" "NodeGuardian controller hook completed"
+    }
+    
+    # 执行主函数
+    main "$@"

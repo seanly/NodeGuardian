@@ -1,0 +1,267 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: nodeguardianrules.nodeguardian.k8s.io
+spec:
+  group: nodeguardian.k8s.io
+  scope: Cluster  # 集群级别资源
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required: ["conditions", "nodeSelector", "actions"]
+              properties:
+                # 1. 触发条件（支持多条件组合）
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    required: ["metric", "operator", "value"]
+                    properties:
+                      metric:
+                        type: string
+                        enum: ["cpuUtilizationPercent", "cpuLoadRatio", "memoryUtilizationPercent", "diskUtilizationPercent"]
+                        description: "监控指标类型"
+                      operator:
+                        type: string
+                        enum: ["GreaterThan", "LessThan", "EqualTo", "NotEqualTo", "GreaterThanOrEqual", "LessThanOrEqual"]
+                        description: "比较操作符"
+                      value:
+                        type: number
+                        description: "阈值数值"
+                      duration:
+                        type: string
+                        default: "5m"
+                        description: "持续时间（如5m, 10m）"
+                      description:
+                        type: string
+                        description: "条件描述"
+
+                # 2. 条件组合逻辑
+                conditionLogic:
+                  type: string
+                  enum: ["AND", "OR"]
+                  default: "AND"
+                  description: "多条件组合逻辑"
+
+                # 3. 目标节点选择器
+                nodeSelector:
+                  type: object
+                  properties:
+                    matchLabels:
+                      type: object
+                      additionalProperties:
+                        type: string
+                    matchExpressions:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          key:
+                            type: string
+                          operator:
+                            type: string
+                            enum: ["In", "NotIn", "Exists", "DoesNotExist", "Gt", "Lt"]
+                          values:
+                            type: array
+                            items:
+                              type: string
+                    nodeNames:
+                      type: array
+                      items:
+                        type: string
+
+                # 4. 执行动作
+                actions:
+                  type: array
+                  items:
+                    type: object
+                    required: ["type"]
+                    properties:
+                      type:
+                        type: string
+                        enum: ["taint", "alert", "evict", "drain", "label", "annotation"]
+                        description: "动作类型"
+                      # 污点动作配置
+                      taint:
+                        type: object
+                        properties:
+                          key:
+                            type: string
+                            default: "nodeguardian/rule-triggered"
+                          value:
+                            type: string
+                            default: "true"
+                          effect:
+                            type: string
+                            enum: ["NoSchedule", "PreferNoSchedule", "NoExecute"]
+                            default: "NoSchedule"
+                      # 告警动作配置
+                      alert:
+                        type: object
+                        properties:
+                          enabled:
+                            type: boolean
+                            default: true
+                          template:
+                            type: string
+                            description: "告警模板名称"
+                          channels:
+                            type: array
+                            items:
+                              type: string
+                            description: "告警渠道（email, webhook, slack等）"
+                      # 驱逐动作配置
+                      evict:
+                        type: object
+                        properties:
+                          maxPods:
+                            type: integer
+                            default: 10
+                            description: "最大驱逐Pod数量"
+                          excludeNamespaces:
+                            type: array
+                            items:
+                              type: string
+                            default: ["kube-system", "kube-public"]
+                      # 标签动作配置
+                      label:
+                        type: object
+                        properties:
+                          labels:
+                            type: object
+                            additionalProperties:
+                              type: string
+                      # 注解动作配置
+                      annotation:
+                        type: object
+                        properties:
+                          annotations:
+                            type: object
+                            additionalProperties:
+                              type: string
+
+                # 5. 恢复条件
+                recoveryConditions:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      metric:
+                        type: string
+                      operator:
+                        type: string
+                      value:
+                        type: number
+                      duration:
+                        type: string
+                        default: "5m"
+
+                # 6. 恢复动作
+                recoveryActions:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      type:
+                        type: string
+                        enum: ["removeTaint", "removeLabel", "removeAnnotation", "alert"]
+                      taint:
+                        type: object
+                        properties:
+                          key:
+                            type: string
+                      label:
+                        type: object
+                        properties:
+                          keys:
+                            type: array
+                            items:
+                              type: string
+                      annotation:
+                        type: object
+                        properties:
+                          keys:
+                            type: array
+                            items:
+                              type: string
+
+                # 7. 监控配置
+                monitoring:
+                  type: object
+                  properties:
+                    checkInterval:
+                      type: string
+                      default: "60s"
+                      description: "检查间隔"
+                    metricsSource:
+                      type: object
+                      properties:
+                        prometheusURL:
+                          type: string
+                        useMetricsServer:
+                          type: boolean
+                          default: false
+                    cooldownPeriod:
+                      type: string
+                      default: "5m"
+                      description: "冷却期，避免频繁触发"
+
+                # 8. 规则元数据
+                metadata:
+                  type: object
+                  properties:
+                    priority:
+                      type: integer
+                      default: 100
+                      description: "规则优先级，数字越小优先级越高"
+                    enabled:
+                      type: boolean
+                      default: true
+                    description:
+                      type: string
+                      description: "规则描述"
+                    tags:
+                      type: array
+                      items:
+                        type: string
+                      description: "规则标签"
+
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum: ["Active", "Inactive", "Error"]
+                lastTriggered:
+                  type: string
+                  format: date-time
+                triggeredNodes:
+                  type: array
+                  items:
+                    type: string
+                lastError:
+                  type: string
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                        enum: ["True", "False", "Unknown"]
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                      reason:
+                        type: string
+                      message:
+                        type: string

@@ -1,0 +1,58 @@
+apiVersion: nodeguardian.k8s.io/v1
+kind: NodeGuardianRule
+metadata:
+  name: emergency-eviction
+  labels:
+    app.kubernetes.io/name: nodeguardian
+    app.kubernetes.io/component: rule
+spec:
+  conditions:
+    - metric: "memoryUtilizationPercent"
+      operator: "GreaterThan"
+      value: 95
+      duration: "30s"
+      description: "内存使用率超过95%，紧急情况"
+  
+  nodeSelector:
+    matchLabels:
+      node-role.kubernetes.io/worker: "true"
+  
+  actions:
+    - type: "taint"
+      taint:
+        key: "nodeguardian/emergency"
+        value: "true"
+        effect: "NoExecute"
+    - type: "evict"
+      evict:
+        maxPods: 5
+        excludeNamespaces: ["kube-system", "kube-public", "monitoring"]
+    - type: "alert"
+      alert:
+        enabled: true
+        template: "emergency-alert"
+        channels: ["email", "slack", "webhook"]
+  
+  recoveryConditions:
+    - metric: "memoryUtilizationPercent"
+      operator: "LessThan"
+      value: 80
+      duration: "2m"
+  
+  recoveryActions:
+    - type: "removeTaint"
+      taint:
+        key: "nodeguardian/emergency"
+    - type: "alert"
+      alert:
+        template: "emergency-recovery-alert"
+        channels: ["email"]
+  
+  monitoring:
+    checkInterval: "15s"
+    cooldownPeriod: "30m"
+  
+  metadata:
+    priority: 50  # 高优先级
+    description: "紧急内存不足驱逐规则"
+    tags: ["emergency", "critical", "eviction"]

@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: nodeguardian-system
+  labels:
+    name: nodeguardian-system
+    app.kubernetes.io/name: nodeguardian
+    app.kubernetes.io/component: system

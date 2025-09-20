@@ -1,0 +1,50 @@
+apiVersion: nodeguardian.k8s.io/v1
+kind: NodeGuardianRule
+metadata:
+  name: disk-space-alert
+  labels:
+    app.kubernetes.io/name: nodeguardian
+    app.kubernetes.io/component: rule
+spec:
+  conditions:
+    - metric: "diskUtilizationPercent"
+      operator: "GreaterThan"
+      value: 85
+      duration: "1m"
+      description: "磁盘使用率超过85%"
+  
+  nodeSelector:
+    matchLabels:
+      node-role.kubernetes.io/worker: "true"
+  
+  actions:
+    - type: "alert"
+      alert:
+        enabled: true
+        template: "disk-space-alert"
+        channels: ["email", "webhook"]
+    - type: "annotation"
+      annotation:
+        annotations:
+          nodeguardian.io/disk-warning: "true"
+          nodeguardian.io/disk-warning-time: "{{ .timestamp }}"
+  
+  recoveryConditions:
+    - metric: "diskUtilizationPercent"
+      operator: "LessThan"
+      value: 80
+      duration: "2m"
+  
+  recoveryActions:
+    - type: "removeAnnotation"
+      annotation:
+        keys: ["nodeguardian.io/disk-warning", "nodeguardian.io/disk-warning-time"]
+  
+  monitoring:
+    checkInterval: "60s"
+    cooldownPeriod: "5m"
+  
+  metadata:
+    priority: 200
+    description: "磁盘空间告警规则"
+    tags: ["storage", "warning"]

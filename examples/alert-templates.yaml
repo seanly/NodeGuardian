@@ -1,0 +1,115 @@
+apiVersion: nodeguardian.k8s.io/v1
+kind: AlertTemplate
+metadata:
+  name: high-load-alert
+  labels:
+    app.kubernetes.io/name: nodeguardian
+    app.kubernetes.io/component: template
+spec:
+  subject: "[NodeGuardian] 节点 {{ .nodeName }} 高负载告警"
+  body: |
+    节点 {{ .nodeName }} 触发高负载规则：
+    
+    当前指标：
+    - CPU负载率: {{ .metrics.cpuLoadRatio }}
+    - 内存使用率: {{ .metrics.memoryUtilizationPercent }}%
+    - 检查时间: {{ .timestamp }}
+    
+    已执行动作：
+    {{ range .actions }}
+    - {{ .type }}: {{ .description }}
+    {{ end }}
+    
+    问题Pod列表：
+    {{ range .topPods }}
+    - {{ .name }} ({{ .namespace }}): CPU {{ .cpu }}, MEM {{ .memory }}
+    {{ end }}
+    
+    请及时处理。
+  channels: ["email", "slack", "webhook"]
+  variables:
+    nodeName: "string"
+    metrics: "object"
+    actions: "array"
+    topPods: "array"
+    timestamp: "string"
+
+---
+apiVersion: nodeguardian.k8s.io/v1
+kind: AlertTemplate
+metadata:
+  name: disk-space-alert
+  labels:
+    app.kubernetes.io/name: nodeguardian
+    app.kubernetes.io/component: template
+spec:
+  subject: "[NodeGuardian] 磁盘空间告警"
+  body: |
+    磁盘空间告警触发：
+    
+    节点: {{ .nodeName }}
+    磁盘使用率: {{ .metrics.diskUtilizationPercent }}%
+    时间: {{ .timestamp }}
+    
+    请及时清理磁盘空间。
+  channels: ["email", "webhook"]
+  variables:
+    nodeName: "string"
+    metrics: "object"
+    timestamp: "string"
+
+---
+apiVersion: nodeguardian.k8s.io/v1
+kind: AlertTemplate
+metadata:
+  name: emergency-alert
+  labels:
+    app.kubernetes.io/name: nodeguardian
+    app.kubernetes.io/component: template
+spec:
+  subject: "🚨 [NodeGuardian] 紧急告警"
+  body: |
+    🚨🚨🚨 紧急告警 🚨🚨🚨
+    
+    节点: {{ .nodeName }}
+    内存使用率: {{ .metrics.memoryUtilizationPercent }}%
+    时间: {{ .timestamp }}
+    
+    已执行紧急动作：
+    - 驱逐部分Pod释放资源
+    - 添加NoExecute污点
+    - 发送紧急通知
+    
+    请立即处理！
+  channels: ["email", "slack", "webhook"]
+  variables:
+    nodeName: "string"
+    metrics: "object"
+    timestamp: "string"
+
+---
+apiVersion: nodeguardian.k8s.io/v1
+kind: AlertTemplate
+metadata:
+  name: recovery-alert
+  labels:
+    app.kubernetes.io/name: nodeguardian
+    app.kubernetes.io/component: template
+spec:
+  subject: "[NodeGuardian] 节点恢复通知"
+  body: |
+    ✅ 节点状态恢复
+    
+    节点: {{ .nodeName }}
+    时间: {{ .timestamp }}
+    
+    已执行恢复动作：
+    - 移除污点
+    - 清理标签
+    - 恢复正常调度
+    
+    节点已恢复正常状态。
+  channels: ["email"]
+  variables:
+    nodeName: "string"
+    timestamp: "string"

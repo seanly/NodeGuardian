@@ -1,0 +1,83 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: nodeguardian
+  namespace: nodeguardian-system
+  labels:
+    app.kubernetes.io/name: nodeguardian
+    app.kubernetes.io/component: controller
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: nodeguardian
+  labels:
+    app.kubernetes.io/name: nodeguardian
+    app.kubernetes.io/component: controller
+rules:
+# NodeGuardianRule CRD权限
+- apiGroups: ["nodeguardian.k8s.io"]
+  resources: ["nodeguardianrules"]
+  verbs: ["get", "list", "watch", "update", "patch"]
+- apiGroups: ["nodeguardian.k8s.io"]
+  resources: ["nodeguardianrules/status"]
+  verbs: ["get", "update", "patch"]
+
+# AlertTemplate CRD权限
+- apiGroups: ["nodeguardian.k8s.io"]
+  resources: ["alerttemplates"]
+  verbs: ["get", "list", "watch"]
+
+# 节点权限
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["get", "list", "watch", "update", "patch"]
+- apiGroups: [""]
+  resources: ["nodes/status"]
+  verbs: ["get", "update", "patch"]
+
+# Pod权限（用于驱逐）
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch", "delete"]
+- apiGroups: [""]
+  resources: ["pods/eviction"]
+  verbs: ["create"]
+
+# 命名空间权限
+- apiGroups: [""]
+  resources: ["namespaces"]
+  verbs: ["get", "list", "watch"]
+
+# 配置映射权限
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get", "list", "watch", "create", "update", "patch"]
+
+# 事件权限
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["create", "patch"]
+
+# Metrics API权限
+- apiGroups: ["metrics.k8s.io"]
+  resources: ["nodes", "pods"]
+  verbs: ["get", "list"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: nodeguardian
+  labels:
+    app.kubernetes.io/name: nodeguardian
+    app.kubernetes.io/component: controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: nodeguardian
+subjects:
+- kind: ServiceAccount
+  name: nodeguardian
+  namespace: nodeguardian-system
