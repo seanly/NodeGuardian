@@ -31,7 +31,7 @@ spec:
       alert:
         enabled: true
         template: "emergency-alert"
-        channels: ["email", "slack", "webhook"]
+        channels: ["webhook", "email"]
   
   recoveryConditions:
     - metric: "memoryUtilizationPercent"
@@ -46,7 +46,7 @@ spec:
     - type: "alert"
       alert:
         template: "emergency-recovery-alert"
-        channels: ["email"]
+        channels: ["log", "email"]
   
   monitoring:
     checkInterval: "15s"

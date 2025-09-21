@@ -22,7 +22,7 @@ spec:
       alert:
         enabled: true
         template: "disk-space-alert"
-        channels: ["email", "webhook"]
+        channels: ["webhook", "email"]
     - type: "annotation"
       annotation:
         annotations:

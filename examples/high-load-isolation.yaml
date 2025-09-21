@@ -37,7 +37,7 @@ spec:
       alert:
         enabled: true
         template: "high-load-alert"
-        channels: ["email", "slack"]
+        channels: ["webhook", "email"]
     - type: "label"
       label:
         labels:
@@ -66,7 +66,7 @@ spec:
     - type: "alert"
       alert:
         template: "recovery-alert"
-        channels: ["email"]
+        channels: ["log", "email"]
   
   # 监控配置
   monitoring:

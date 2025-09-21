@@ -116,7 +116,7 @@ spec:
                             type: array
                             items:
                               type: string
-                            description: "告警渠道（email, webhook, slack等）"
+                            description: "告警渠道（log, webhook, email等）"
                       # 驱逐动作配置
                       evict:
                         type: object

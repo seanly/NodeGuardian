@@ -26,7 +26,7 @@ spec:
     {{ end }}
     
     请及时处理。
-  channels: ["email", "slack", "webhook"]
+  channels: ["webhook", "email"]
   variables:
     nodeName: "string"
     metrics: "object"
@@ -52,7 +52,7 @@ spec:
     时间: {{ .timestamp }}
     
     请及时清理磁盘空间。
-  channels: ["email", "webhook"]
+  channels: ["webhook", "email"]
   variables:
     nodeName: "string"
     metrics: "object"
@@ -81,7 +81,7 @@ spec:
     - 发送紧急通知
     
     请立即处理！
-  channels: ["email", "slack", "webhook"]
+  channels: ["webhook", "email"]
   variables:
     nodeName: "string"
     metrics: "object"
@@ -109,7 +109,7 @@ spec:
     - 恢复正常调度
     
     节点已恢复正常状态。
-  channels: ["email"]
+  channels: ["log", "email"]
   variables:
     nodeName: "string"
     timestamp: "string"

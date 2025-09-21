@@ -140,7 +140,7 @@ spec:
                             type: array
                             items:
                               type: string
-                            description: "告警渠道（email, webhook, slack等）"
+                            description: "告警渠道（log, webhook, email等）"
                       # 驱逐动作配置
                       evict:
                         type: object
@@ -334,7 +334,7 @@ spec:
       alert:
         enabled: true
         template: "high-load-alert"
-        channels: ["email", "slack"]
+        channels: ["webhook", "email"]
     - type: "label"
       label:
         labels:
@@ -363,7 +363,7 @@ spec:
     - type: "alert"
       alert:
         template: "recovery-alert"
-        channels: ["email"]
+        channels: ["log", "email"]
   
   # 监控配置
   monitoring:
@@ -404,7 +404,7 @@ spec:
       alert:
         enabled: true
         template: "disk-space-alert"
-        channels: ["email", "webhook"]
+        channels: ["webhook", "email"]
     - type: "annotation"
       annotation:
         annotations:
@@ -465,7 +465,7 @@ spec:
       alert:
         enabled: true
         template: "emergency-alert"
-        channels: ["email", "slack", "webhook"]
+        channels: ["webhook", "email"]
   
   recoveryConditions:
     - metric: "memoryUtilizationPercent"
@@ -480,7 +480,7 @@ spec:
     - type: "alert"
       alert:
         template: "emergency-recovery-alert"
-        channels: ["email"]
+        channels: ["log", "email"]
   
   monitoring:
     checkInterval: "15s"
@@ -562,7 +562,7 @@ spec:
     {{ end }}
     
     请及时处理。
-  channels: ["email", "slack", "webhook"]
+  channels: ["webhook", "email"]
   variables:
     nodeName: "string"
     metrics: "object"

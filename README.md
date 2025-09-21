@@ -130,9 +130,7 @@ kubectl get alerttemplates
 **支持的告警渠道**:
 - 日志输出
 - Webhook
-- 邮件
-- Slack
-- Microsoft Teams
+- 邮件发送
 
 ### 003-recovery-manager.sh
 

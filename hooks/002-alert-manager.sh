@@ -8,6 +8,87 @@ set -euo pipefail
 # 加载公共函数库
 source /hooks/common/functions.sh
 
+# 配置目录
+CONFIG_DIR="/etc/nodeguardian/config"
+SECRETS_DIR="/etc/nodeguardian/secrets"
+CONFIG_FILE="$CONFIG_DIR/config.json"
+
+# 加载统一配置文件
+hook::load_config() {
+    if [[ -f "$CONFIG_FILE" ]]; then
+        cat "$CONFIG_FILE"
+    else
+        # 返回默认配置
+        cat <<EOF
+{
+  "email": {
+    "smtpServer": "smtp.gmail.com",
+    "smtpPort": 587,
+    "useTLS": true,
+    "useSSL": false
+  },
+  "prometheus": {
+    "url": "http://prometheus-k8s.monitoring.svc:9090",
+    "timeout": "30s"
+  },
+  "alert": {
+    "defaultChannels": ["log", "email"],
+    "retryAttempts": 3
+  },
+  "monitoring": {
+    "defaultCheckInterval": "30s",
+    "defaultCooldownPeriod": "10m"
+  }
+}
+EOF
+    fi
+}
+
+# 加载Secret配置
+hook::load_secret() {
+    local secret_file="$1"
+    
+    if [[ -f "$SECRETS_DIR/$secret_file" ]]; then
+        cat "$SECRETS_DIR/$secret_file"
+    else
+        echo ""
+    fi
+}
+
+# 初始化配置
+hook::init_config() {
+    # 加载统一配置文件
+    local full_config=$(hook::load_config)
+    
+    # 加载Secret中的敏感信息
+    local email_username=$(hook::load_secret "email-username")
+    local email_password=$(hook::load_secret "email-password")
+    local webhook_url=$(hook::load_secret "webhook-url")
+    
+    # 合并敏感信息到配置中
+    if [[ -n "$email_username" ]]; then
+        full_config=$(echo "$full_config" | jq --arg username "$email_username" '.email.username = $username')
+    fi
+    
+    if [[ -n "$email_password" ]]; then
+        full_config=$(echo "$full_config" | jq --arg password "$email_password" '.email.password = $password')
+    fi
+    
+    if [[ -n "$webhook_url" ]]; then
+        full_config=$(echo "$full_config" | jq --arg url "$webhook_url" '.alert.webhookUrl = $url')
+    fi
+    
+    # 设置环境变量
+    export NODEGUARDIAN_CONFIG="$full_config"
+    export NODEGUARDIAN_EMAIL_CONFIG=$(echo "$full_config" | jq -c '.email')
+    export NODEGUARDIAN_WEBHOOK_URL=$(echo "$full_config" | jq -r '.alert.webhookUrl // ""')
+    export NODEGUARDIAN_PROMETHEUS_CONFIG=$(echo "$full_config" | jq -c '.prometheus')
+    export NODEGUARDIAN_ALERT_CONFIG=$(echo "$full_config" | jq -c '.alert')
+    export NODEGUARDIAN_MONITORING_CONFIG=$(echo "$full_config" | jq -c '.monitoring')
+    
+    log::info "Configuration loaded successfully"
+}
+
 # Hook配置函数
 hook::config() {
     cat <<EOF
@@ -32,28 +113,28 @@ hook::trigger() {
     # 初始化
     init::nodeguardian
     
-    # 读取绑定上下文
-    local binding_context_path="${BINDING_CONTEXT_PATH:-/tmp/binding_context.json}"
-    validate::file_exists "$binding_context_path"
+    # 检查Python脚本是否存在
+    local python_script="/scripts/alert_manager.py"
+    if [[ ! -f "$python_script" ]]; then
+        log::error "Python alert manager script not found: $python_script"
+        exit 1
+    fi
     
-    # 处理绑定上下文
-    local context_type=$(jq -r '.[0].type' "$binding_context_path")
-    local binding=$(jq -r '.[0].binding' "$binding_context_path")
+    # 检查Python是否可用
+    if ! command -v python3 >/dev/null 2>&1; then
+        log::error "Python3 not available, cannot run alert manager"
+        exit 1
+    fi
     
-    log::info "Alert manager processing: type=$context_type, binding=$binding"
+    log::info "Calling Python alert manager script"
     
-    case "$context_type" in
-        "Synchronization")
-            hook::handle_templates_synchronization
-            ;;
-        "Event")
-            hook::handle_template_event "$binding_context_path"
-            ;;
-        *)
-            # 处理直接调用（从控制器调用）
-            hook::handle_direct_call "$@"
-            ;;
-    esac
+    # 调用Python脚本
+    if python3 "$python_script" "$@"; then
+        log::info "Python alert manager script completed successfully"
+    else
+        log::error "Python alert manager script failed"
+        exit 1
+    fi
 }
 
 # 处理模板同步
@@ -272,12 +353,6 @@ hook::send_to_channel() {
         "email")
             hook::send_to_email "$channel_config" "$alert_content"
             ;;
-        "slack")
-            hook::send_to_slack "$channel_config" "$alert_content"
-            ;;
-        "teams")
-            hook::send_to_teams "$channel_config" "$alert_content"
-            ;;
         *)
             log::warn "Unknown channel type: $channel_type"
             ;;
@@ -302,8 +377,22 @@ hook::send_to_webhook() {
     local channel_config="$1"
     local alert_content="$2"
     
-    local webhook_url=$(echo "$channel_config" | jq -r '.url')
-    local webhook_headers=$(echo "$channel_config" | jq -r '.headers // {}')
+    local webhook_url
+    local webhook_headers
+    
+    if [[ -n "$channel_config" && "$channel_config" != "null" ]]; then
+        # 使用传入的配置
+        webhook_url=$(echo "$channel_config" | jq -r '.url')
+        webhook_headers=$(echo "$channel_config" | jq -r '.headers // {}')
+    elif [[ -n "${NODEGUARDIAN_WEBHOOK_URL:-}" ]]; then
+        # 使用ConfigMap中的配置
+        webhook_url="$NODEGUARDIAN_WEBHOOK_URL"
+        webhook_headers="{}"
+    else
+        # 从环境变量获取（向后兼容）
+        webhook_url="${ALERT_WEBHOOK_URL:-}"
+        webhook_headers="{}"
+    fi
     
     if [[ -z "$webhook_url" ]]; then
         log::warn "Webhook URL not configured"
@@ -336,170 +425,34 @@ hook::send_to_email() {
     local channel_config="$1"
     local alert_content="$2"
     
-    local smtp_server=$(echo "$channel_config" | jq -r '.smtpServer')
-    local smtp_port=$(echo "$channel_config" | jq -r '.smtpPort // 587')
-    local username=$(echo "$channel_config" | jq -r '.username')
-    local password=$(echo "$channel_config" | jq -r '.password')
-    local from=$(echo "$channel_config" | jq -r '.from')
-    local to=$(echo "$channel_config" | jq -r '.to')
-    
-    if [[ -z "$smtp_server" || -z "$from" || -z "$to" ]]; then
-        log::warn "Email configuration incomplete"
+    # 检查Python脚本是否存在
+    local email_script="/scripts/sendmail.py"
+    if [[ ! -f "$email_script" ]]; then
+        log::error "Email script not found: $email_script"
         return 1
     fi
     
-    log::info "Sending alert to email: $to"
+    # 检查Python是否可用
+    if ! command -v python3 >/dev/null 2>&1; then
+        log::error "Python3 not available, cannot send email"
+        return 1
+    fi
     
-    local title=$(echo "$alert_content" | jq -r '.title')
-    local summary=$(echo "$alert_content" | jq -r '.summary')
-    local description=$(echo "$alert_content" | jq -r '.description')
+    log::info "Sending alert via email"
     
-    # 使用mail命令发送邮件（需要安装mailutils）
-    if command -v mail >/dev/null 2>&1; then
-        echo "$description" | mail -s "$title" "$to" || log::error "Failed to send email alert"
+    # 调用Python邮件发送脚本（使用统一配置）
+    if python3 "$email_script" \
+        --alert-data "$alert_content" \
+        --format "html"; then
+        log::info "Email sent successfully"
     else
-        log::warn "mail command not available, skipping email alert"
+        log::error "Failed to send email"
+        return 1
     fi
 }
 
-# 发送到Slack
-hook::send_to_slack() {
-    local channel_config="$1"
-    local alert_content="$2"
-    
-    local webhook_url=$(echo "$channel_config" | jq -r '.webhookUrl')
-    local channel=$(echo "$channel_config" | jq -r '.channel // "#alerts"')
-    local username=$(echo "$channel_config" | jq -r '.username // "NodeGuardian"')
-    
-    if [[ -z "$webhook_url" ]]; then
-        log::warn "Slack webhook URL not configured"
-        return 1
-    fi
-    
-    log::info "Sending alert to Slack channel: $channel"
-    
-    local title=$(echo "$alert_content" | jq -r '.title')
-    local summary=$(echo "$alert_content" | jq -r '.summary')
-    local severity=$(echo "$alert_content" | jq -r '.severity')
-    local rule_name=$(echo "$alert_content" | jq -r '.ruleName')
-    local triggered_nodes=$(echo "$alert_content" | jq -r '.triggeredNodes')
-    
-    # 根据严重程度选择颜色
-    local color="warning"
-    case "$severity" in
-        "critical"|"error")
-            color="danger"
-            ;;
-        "warning")
-            color="warning"
-            ;;
-        "info")
-            color="good"
-            ;;
-    esac
-    
-    local slack_payload=$(cat <<EOF
-{
-  "channel": "$channel",
-  "username": "$username",
-  "attachments": [
-    {
-      "color": "$color",
-      "title": "$title",
-      "text": "$summary",
-      "fields": [
-        {
-          "title": "Rule",
-          "value": "$rule_name",
-          "short": true
-        },
-        {
-          "title": "Nodes",
-          "value": "$triggered_nodes",
-          "short": true
-        }
-      ],
-      "timestamp": $(date +%s)
-    }
-  ]
-}
-EOF
-)
-    
-    curl -s -X POST "$webhook_url" \
-        -H 'Content-Type: application/json' \
-        -d "$slack_payload" || log::error "Failed to send Slack alert"
-}
-
-# 发送到Teams
-hook::send_to_teams() {
-    local channel_config="$1"
-    local alert_content="$2"
-    
-    local webhook_url=$(echo "$channel_config" | jq -r '.webhookUrl')
-    
-    if [[ -z "$webhook_url" ]]; then
-        log::warn "Teams webhook URL not configured"
-        return 1
-    fi
-    
-    log::info "Sending alert to Microsoft Teams"
-    
-    local title=$(echo "$alert_content" | jq -r '.title')
-    local summary=$(echo "$alert_content" | jq -r '.summary')
-    local severity=$(echo "$alert_content" | jq -r '.severity')
-    local rule_name=$(echo "$alert_content" | jq -r '.ruleName')
-    local triggered_nodes=$(echo "$alert_content" | jq -r '.triggeredNodes')
-    
-    # 根据严重程度选择颜色
-    local color="FFA500"  # 橙色
-    case "$severity" in
-        "critical"|"error")
-            color="FF0000"  # 红色
-            ;;
-        "warning")
-            color="FFA500"  # 橙色
-            ;;
-        "info")
-            color="00FF00"  # 绿色
-            ;;
-    esac
-    
-    local teams_payload=$(cat <<EOF
-{
-  "@type": "MessageCard",
-  "@context": "http://schema.org/extensions",
-  "themeColor": "$color",
-  "summary": "$title",
-  "sections": [
-    {
-      "activityTitle": "$title",
-      "activitySubtitle": "$summary",
-      "facts": [
-        {
-          "name": "Rule",
-          "value": "$rule_name"
-        },
-        {
-          "name": "Severity",
-          "value": "$severity"
-        },
-        {
-          "name": "Nodes",
-          "value": "$triggered_nodes"
-        }
-      ],
-      "markdown": true
-    }
-  ]
-}
-EOF
-)
-    
-    curl -s -X POST "$webhook_url" \
-        -H 'Content-Type: application/json' \
-        -d "$teams_payload" || log::error "Failed to send Teams alert"
-}
+# 初始化配置
+hook::init_config
 
 # 调用公共运行函数
 common::run_hook "$@"

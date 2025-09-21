@@ -1,0 +1,152 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nodeguardian-config
+  namespace: nodeguardian-system
+  labels:
+    app: nodeguardian
+    component: config
+data:
+  # 统一配置文件
+  config.json: |
+    {
+      "email": {
+        "smtpServer": "smtp.gmail.com",
+        "smtpPort": 587,
+        "username": "",
+        "password": "",
+        "from": "nodeguardian@yourdomain.com",
+        "to": ["admin@yourdomain.com", "ops@yourdomain.com"],
+        "useTLS": true,
+        "useSSL": false
+      },
+      "prometheus": {
+        "url": "http://prometheus-k8s.monitoring.svc:9090",
+        "timeout": "30s",
+        "retries": 3,
+        "queryTimeout": "60s",
+        "maxSamples": 10000
+      },
+      "alert": {
+        "webhookUrl": "",
+        "defaultChannels": ["log", "email", "webhook"],
+        "retryAttempts": 3,
+        "retryDelay": "5s",
+        "batchSize": 10,
+        "batchTimeout": "30s"
+      },
+      "monitoring": {
+        "defaultCheckInterval": "30s",
+        "defaultCooldownPeriod": "10m",
+        "metricsServerUrl": "https://kubernetes.default.svc:443/apis/metrics.k8s.io/v1beta1",
+        "maxConcurrentChecks": 10,
+        "healthCheckInterval": "60s"
+      },
+      "log": {
+        "level": "INFO",
+        "format": "json",
+        "output": "stdout",
+        "maxSize": "100MB",
+        "maxBackups": 3,
+        "maxAge": "7d"
+      },
+      "node": {
+        "defaultTaintKey": "nodeguardian.io/status",
+        "defaultTaintEffect": "NoSchedule",
+        "defaultLabelPrefix": "nodeguardian.io/",
+        "excludeNamespaces": ["kube-system", "kube-public", "monitoring"],
+        "maxEvictionPods": 10
+      }
+    }
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: nodeguardian-secrets
+  namespace: nodeguardian-system
+  labels:
+    app: nodeguardian
+    component: secrets
+type: Opaque
+data:
+  # Base64编码的敏感配置
+  # 使用以下命令生成base64编码:
+  # echo -n "your-email@gmail.com" | base64
+  # echo -n "your-app-password" | base64
+  # echo -n "https://your-webhook-url.com/alerts" | base64
+  email-username: eW91ci1lbWFpbEBnbWFpbC5jb20=  # your-email@gmail.com
+  email-password: eW91ci1hcHAtcGFzc3dvcmQ=      # your-app-password
+  webhook-url: aHR0cHM6Ly95b3VyLXdlYmhvb2stdXJsLmNvbS9hbGVydHM=  # https://your-webhook-url.com/alerts
+
+---
+apiVersion: nodeguardian.io/v1
+kind: NodeGuardianRule
+metadata:
+  name: unified-config-example
+  namespace: nodeguardian-system
+spec:
+  # 节点选择器
+  nodeSelector:
+    matchLabels:
+      node-role.kubernetes.io/worker: ""
+  
+  # 监控条件
+  conditions:
+    - metric: "memoryUtilizationPercent"
+      operator: "GreaterThan"
+      value: 85
+      duration: "2m"
+  
+  # 执行动作 - 使用默认配置中的告警渠道
+  actions:
+    - type: "alert"
+      alert:
+        enabled: true
+        template: "high-memory-alert"
+        # 使用统一配置中的默认渠道
+        channels: []  # 空数组表示使用默认配置中的defaultChannels
+  
+  # 监控配置 - 使用默认配置
+  monitoring:
+    # 使用统一配置中的默认值
+    checkInterval: ""  # 空值表示使用默认配置
+    cooldownPeriod: "" # 空值表示使用默认配置
+    metricsSource:
+      type: "prometheus"
+      # 使用统一配置中的Prometheus URL
+      url: ""
+
+---
+apiVersion: nodeguardian.io/v1
+kind: AlertTemplate
+metadata:
+  name: high-memory-alert
+  namespace: nodeguardian-system
+spec:
+  title: "高内存使用告警 - {{ .nodeName }}"
+  summary: |
+    节点 {{ .nodeName }} 内存使用率过高
+    
+    当前内存使用率: {{ .metrics.memoryUtilizationPercent }}%
+    阈值: 85%
+    
+    请及时处理。
+  description: |
+    详细信息:
+    - 节点: {{ .nodeName }}
+    - 内存使用率: {{ .metrics.memoryUtilizationPercent }}%
+    - CPU使用率: {{ .metrics.cpuUtilizationPercent }}%
+    - 磁盘使用率: {{ .metrics.diskUtilizationPercent }}%
+    - 触发时间: {{ .timestamp }}
+    
+    建议操作:
+    1. 检查节点上的高内存使用进程
+    2. 考虑重启相关Pod
+    3. 检查是否有内存泄漏
+  # 使用统一配置中的默认渠道
+  channels: []
+  variables:
+    nodeName: "string"
+    metrics: "object"
+    timestamp: "string"

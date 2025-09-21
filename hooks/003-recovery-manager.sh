@@ -8,6 +8,45 @@ set -euo pipefail
 # 加载公共函数库
 source /hooks/common/functions.sh
 
+# 配置目录
+CONFIG_DIR="/etc/nodeguardian/config"
+SECRETS_DIR="/etc/nodeguardian/secrets"
+CONFIG_FILE="$CONFIG_DIR/config.json"
+
+# 加载统一配置文件
+hook::load_config() {
+    if [[ -f "$CONFIG_FILE" ]]; then
+        cat "$CONFIG_FILE"
+    else
+        # 返回默认配置
+        cat <<EOF
+{
+  "prometheus": {
+    "url": "http://prometheus-k8s.monitoring.svc:9090",
+    "timeout": "30s"
+  },
+  "monitoring": {
+    "defaultCheckInterval": "30s",
+    "defaultCooldownPeriod": "10m"
+  }
+}
+EOF
+    fi
+}
+
+# 初始化配置
+hook::init_config() {
+    # 加载统一配置文件
+    local full_config=$(hook::load_config)
+    
+    # 设置环境变量
+    export NODEGUARDIAN_CONFIG="$full_config"
+    export NODEGUARDIAN_PROMETHEUS_CONFIG=$(echo "$full_config" | jq -c '.prometheus')
+    export NODEGUARDIAN_MONITORING_CONFIG=$(echo "$full_config" | jq -c '.monitoring')
+    
+    log::info "Configuration loaded successfully"
+}
+
 # Hook配置函数
 hook::config() {
     cat <<EOF
@@ -30,26 +69,28 @@ hook::trigger() {
     # 初始化
     init::nodeguardian
     
-    # 读取绑定上下文
-    local binding_context_path="${BINDING_CONTEXT_PATH:-/tmp/binding_context.json}"
-    validate::file_exists "$binding_context_path"
+    # 检查Python脚本是否存在
+    local python_script="/scripts/recovery_manager.py"
+    if [[ ! -f "$python_script" ]]; then
+        log::error "Python recovery manager script not found: $python_script"
+        exit 1
+    fi
     
-    # 处理绑定上下文
-    local context_type=$(jq -r '.[0].type' "$binding_context_path")
-    local binding=$(jq -r '.[0].binding' "$binding_context_path")
+    # 检查Python是否可用
+    if ! command -v python3 >/dev/null 2>&1; then
+        log::error "Python3 not available, cannot run recovery manager"
+        exit 1
+    fi
     
-    log::info "Recovery manager processing: type=$context_type, binding=$binding"
+    log::info "Calling Python recovery manager script"
     
-    case "$context_type" in
-        "Schedule")
-            if [[ "$binding" == "recovery-check" ]]; then
-                hook::check_recovery_conditions
-            fi
-            ;;
-        *)
-            log::warn "Unknown binding context type: $context_type"
-            ;;
-    esac
+    # 调用Python脚本
+    if python3 "$python_script" "$@"; then
+        log::info "Python recovery manager script completed successfully"
+    else
+        log::error "Python recovery manager script failed"
+        exit 1
+    fi
 }
 
 # 检查恢复条件
@@ -342,6 +383,9 @@ EOF
     
     kubectl patch nodeguardianrule "$rule_name" --type=merge --patch="$status_patch" || true
 }
+
+# 初始化配置
+hook::init_config
 
 # 调用公共运行函数
 common::run_hook "$@"

@@ -41,15 +41,18 @@ spec:
         - name: METRICS_SERVER_URL
           value: "https://kubernetes.default.svc:443/apis/metrics.k8s.io/v1beta1"
         # 告警配置
+        - name: ALERT_WEBHOOK_URL
+          value: ""
+        # 邮件配置
         - name: ALERT_EMAIL_SMTP
           value: "smtp.gmail.com:587"
         - name: ALERT_EMAIL_FROM
           value: "nodeguardian@example.com"
         - name: ALERT_EMAIL_TO
           value: "admin@example.com"
-        - name: ALERT_SLACK_WEBHOOK
+        - name: ALERT_EMAIL_USERNAME
           value: ""
-        - name: ALERT_WEBHOOK_URL
+        - name: ALERT_EMAIL_PASSWORD
           value: ""
         resources:
           requests:
@@ -80,6 +83,12 @@ spec:
         - name: hooks
           mountPath: /hooks
           readOnly: true
+        - name: config
+          mountPath: /etc/nodeguardian/config
+          readOnly: true
+        - name: secrets
+          mountPath: /etc/nodeguardian/secrets
+          readOnly: true
       volumes:
       - name: tmp
         emptyDir: {}
@@ -87,6 +96,14 @@ spec:
         configMap:
           name: nodeguardian-hooks
           defaultMode: 0755
+      - name: config
+        configMap:
+          name: nodeguardian-config
+          defaultMode: 0644
+      - name: secrets
+        secret:
+          secretName: nodeguardian-secrets
+          defaultMode: 0600
       restartPolicy: Always
       terminationGracePeriodSeconds: 30
 

@@ -3,6 +3,9 @@
 
 FROM flant/shell-operator:latest
 
+# 安装Python3和必要的包
+RUN apk add --no-cache python3 py3-pip
+
 # 设置工作目录
 WORKDIR /hooks
 
@@ -14,11 +17,20 @@ COPY hooks/001-nodeguardian-controller.sh /hooks/001-nodeguardian-controller.sh
 COPY hooks/002-alert-manager.sh /hooks/002-alert-manager.sh
 COPY hooks/003-recovery-manager.sh /hooks/003-recovery-manager.sh
 
+# 复制Python脚本
+COPY scripts/ /scripts/
+
 # 设置执行权限
 RUN chmod +x /hooks/001-nodeguardian-controller.sh \
     && chmod +x /hooks/002-alert-manager.sh \
     && chmod +x /hooks/003-recovery-manager.sh \
-    && chmod +x /hooks/common/functions.sh
+    && chmod +x /hooks/common/functions.sh \
+    && chmod +x /scripts/sendmail.py \
+    && chmod +x /scripts/nodeguardian_controller.py \
+    && chmod +x /scripts/alert_manager.py \
+    && chmod +x /scripts/recovery_manager.py \
+    && chmod +x /scripts/config-manager.py \
+    && chmod +x /scripts/config_loader.py
 
 # 创建必要的目录
 RUN mkdir -p /tmp/nodeguardian/cooldown \
